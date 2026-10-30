@@ -576,7 +576,12 @@ def admin_report(report_name):
         "pending_complaints_view": "SELECT * FROM pending_complaints_view ORDER BY reported_at",
         "active_assignments_view": "SELECT * FROM active_assignments_view ORDER BY assigned_at",
         "repair_assignment_history": """SELECT r.request_id, r.title, r.current_status,
-            w.full_name AS worker_name, a.assigned_at, a.ended_at
+            w.full_name AS worker_name, a.assigned_at,
+            CASE WHEN r.current_status = 'Resolved' THEN
+                (SELECT MAX(h.changed_at)::date FROM status_history AS h
+                 WHERE h.request_id = r.request_id AND h.status = 'Resolved')
+                ELSE NULL END AS ended_at,
+            CASE WHEN r.current_status = 'Resolved' THEN 'Yes' ELSE 'No' END AS assignment_ended
             FROM maintenance_requests AS r LEFT JOIN assignments AS a ON a.request_id = r.request_id
             LEFT JOIN workers AS w ON w.worker_id = a.worker_id
             ORDER BY r.request_id, a.assigned_at""",

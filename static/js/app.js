@@ -91,10 +91,26 @@ function passwordChangeScreen() {
 }
 
 function empty(message) { return `<p class="empty">${esc(message)}</p>`; }
-function date(value) { if (!value) return "—"; const d = new Date(value); return Number.isNaN(d.getTime()) ? esc(value) : esc(d.toLocaleString()); }
+function date(value) {
+  if (!value) return "—";
+  const d = new Date(value);
+  // PostgreSQL stores these columns without timezone data. Flask labels them GMT,
+  // so use the serialized clock fields to preserve the database's Asia/Calcutta time.
+  return Number.isNaN(d.getTime()) ? esc(value) : esc(d.toLocaleString("en-GB", { timeZone: "UTC" }));
+}
+function dateOnly(value) {
+  if (!value) return "—";
+  const text = String(value);
+  const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(text);
+  if (iso) return `${iso[3]}/${iso[2]}/${iso[1]}`;
+  const postgres = /(?:\w{3},\s*)?(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})/.exec(text);
+  if (postgres) return `${postgres[1].padStart(2, "0")} ${postgres[2]} ${postgres[3]}`;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? esc(value) : esc(parsed.toLocaleDateString("en-GB"));
+}
 function table(headers, rows) {
   if (!rows.length) return empty("No matching records were found.");
-  return `<div class="table-wrap"><table><thead><tr>${headers.map(([, label]) => `<th scope="col">${esc(label)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${headers.map(([key]) => `<td>${key === "reported_at" || key === "assigned_at" || key === "ended_at" || key === "changed_at" ? date(row[key]) : esc(row[key] ?? "—")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr>${headers.map(([, label]) => `<th scope="col">${esc(label)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${headers.map(([key]) => `<td>${key === "ended_at" ? dateOnly(row[key]) : key === "reported_at" || key === "assigned_at" || key === "changed_at" ? date(row[key]) : esc(row[key] ?? "—")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
 }
 function locationName(row) { return [row.building_name, row.area_name].filter(Boolean).join(" / "); }
 function requestRows(rows, mode) {
@@ -206,7 +222,7 @@ async function showPage(page = "dashboard") {
         <section class="panel"><h2>Assign worker to a request</h2><form id="admin-assign-worker-form"><div class="form-grid">
           <div class="field"><label for="assignment-request">Maintenance request</label><select id="assignment-request" name="request_id" required><option value="">Choose a request</option>${requests.map((r) => `<option value="${esc(r.request_id)}">#${esc(r.request_id)} · ${esc(r.title)} · ${esc(r.current_status)}</option>`).join("")}</select></div>
           <div class="field"><label for="assignment-worker">Worker</label><select id="assignment-worker" name="worker_id" required><option value="">Choose a worker</option>${workers.map((w) => `<option value="${esc(w.worker_id)}">${esc(w.full_name)} · ${esc(w.specialization)}</option>`).join("")}</select></div>
-        </div><div class="form-actions"><button class="button" type="submit" ${!requests.length || !workers.length ? "disabled" : ""}>Assign worker</button></div></form><div id="assignment-history">${table([["request_id", "Request ID"], ["title", "Request"], ["worker_name", "Worker"], ["assigned_at", "Assigned"], ["ended_at", "Assignment ended"]], (await api("/api/admin/reports/repair_assignment_history")).rows || [])}</div></section>
+        </div><div class="form-actions"><button class="button" type="submit" ${!requests.length || !workers.length ? "disabled" : ""}>Assign worker</button></div></form><div id="assignment-history">${table([["request_id", "Request ID"], ["title", "Request"], ["worker_name", "Worker"], ["assigned_at", "Assigned"], ["assignment_ended", "Assignment ended?"], ["ended_at", "Ended date"]], (await api("/api/admin/reports/repair_assignment_history")).rows || [])}</div></section>
         <section class="panel"><h2>Worker directory</h2>${table([["worker_id", "Worker ID"], ["full_name", "Name"], ["specialization", "Specialization"], ["phone", "Phone"]], workers)}</section>`;
     }
     shell(content);
