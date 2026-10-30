@@ -118,7 +118,7 @@ function requestRows(rows, mode) {
   const canAdmin = state.user.role === "Admin";
   return `<div class="table-wrap"><table><thead><tr><th>ID</th>${canAdmin ? "<th>Reporter name</th><th>Reporter role</th><th>Reporter email</th><th>Assigned worker</th>" : ""}<th>Request</th><th>Category</th><th>Priority</th><th>Status</th><th>Location</th><th>Reported</th>${mode ? "<th>Action</th>" : ""}</tr></thead><tbody>${rows.map((r) => `<tr>
     <td class="request-id-cell">${esc(r.request_id)}</td>${canAdmin ? `<td>${esc(r.reporter_name || "—")}</td><td>${esc(r.reporter_role || "—")}</td><td>${esc(r.reporter_email || "—")}</td><td>${esc(r.assigned_worker_name || "—")}</td>` : ""}<td class="request-details-cell"><strong>${esc(r.title)}</strong><br>${esc(r.description || "")}</td><td>${esc(r.category)}</td><td class="request-priority-cell">${esc(r.priority)}</td><td class="request-status-cell">${esc(r.current_status)}</td><td>${esc(locationName(r))}</td><td class="request-reported-cell">${date(r.reported_at)}</td>
-    ${mode ? `<td><div class="actions">${mode === "update" ? `<button class="button small" data-edit="${esc(r.request_id)}">Edit</button>${canAdmin ? `<button class="button secondary small" data-edit-status="${esc(r.request_id)}">Update status</button>` : ""}` : ""}<button class="button danger small" data-delete="${esc(r.request_id)}" data-admin-delete="${canAdmin}">Delete</button></div></td>` : ""}
+    ${mode ? `<td><div class="actions">${mode === "update" ? `<button class="button small" data-edit="${esc(r.request_id)}">Edit</button>` : ""}<button class="button danger small" data-delete="${esc(r.request_id)}" data-admin-delete="${canAdmin}">Delete</button></div></td>` : ""}
     </tr>`).join("")}</tbody></table></div>`;
 }
 
@@ -333,7 +333,7 @@ function bindSearch(page) {
   }, 0));
 }
 
-async function editRequest(requestId, statusOnly = false) {
+async function editRequest(requestId) {
   try {
     let row;
     if (state.user.role === "Admin") {
@@ -347,14 +347,13 @@ async function editRequest(requestId, statusOnly = false) {
     await loadLocations();
     const admin = state.user.role === "Admin";
     const section = document.getElementById("edit-section");
-    section.innerHTML = `<section class="panel"><h2>${statusOnly ? "Update status for" : "Edit request"} #${esc(row.request_id)}</h2><form id="edit-form" data-id="${esc(row.request_id)}" data-status-only="${statusOnly}"><div class="form-grid">
-      ${statusOnly ? `<div class="field"><label for="edit-status">Current status</label><select id="edit-status" name="current_status" required>${statuses.map((s) => `<option ${s === row.current_status ? "selected" : ""}>${s}</option>`).join("")}</select></div>` : `
+    section.innerHTML = `<section class="panel"><h2>Edit request #${esc(row.request_id)}</h2><form id="edit-form" data-id="${esc(row.request_id)}"><div class="form-grid">
       <div class="field full"><label for="edit-title">Title</label><input id="edit-title" name="title" maxlength="120" value="${esc(row.title)}" required></div>
       <div class="field full"><label for="edit-description">Description</label><textarea id="edit-description" name="description" maxlength="8000" required>${esc(row.description)}</textarea></div>
       <div class="field"><label for="edit-category">Category</label><input id="edit-category" name="category" maxlength="40" value="${esc(row.category)}" required></div>
       <div class="field"><label for="edit-priority">Priority</label><select id="edit-priority" name="priority">${priorities.map((p) => `<option ${p === row.priority ? "selected" : ""}>${p}</option>`).join("")}</select></div>
       <div class="field"><label for="edit-location">Location</label><select id="edit-location" name="location_id">${locationOptions(row.location_id)}</select></div>
-      ${admin ? `<div class="field"><label for="edit-status">Status</label><select id="edit-status" name="current_status">${statuses.map((s) => `<option ${s === row.current_status ? "selected" : ""}>${s}</option>`).join("")}</select></div>` : ""}`}
+      ${admin ? `<div class="field"><label for="edit-status">Status</label><select id="edit-status" name="current_status">${statuses.map((s) => `<option ${s === row.current_status ? "selected" : ""}>${s}</option>`).join("")}</select></div>` : ""}
       </div><div class="form-actions"><button class="button" type="submit">Save changes</button><button class="button secondary" type="button" data-close-edit>Close</button></div></form></section>`;
     document.getElementById("edit-form").addEventListener("submit", saveRequest);
     document.getElementById("edit-form").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -365,13 +364,12 @@ async function saveRequest(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const values = Object.fromEntries(new FormData(form).entries());
-  const statusOnly = form.dataset.statusOnly === "true";
-  if (!statusOnly) values.location_id = Number(values.location_id);
+  values.location_id = Number(values.location_id);
   const requestId = form.dataset.id;
   try {
     const admin = state.user.role === "Admin";
     await api(admin ? `/api/admin/requests/${requestId}` : `/api/requests/${requestId}`, { method: "PATCH", body: JSON.stringify(values) });
-    state.notice = { message: statusOnly ? "Request status updated; status history recorded." : "Request updated successfully.", kind: "success" };
+    state.notice = { message: "Request updated successfully.", kind: "success" };
     await showPage("update");
   } catch (error) { setNotice(error.message); }
 }
@@ -403,8 +401,6 @@ appRoot.addEventListener("click", async (event) => {
   if (nav) { state.notice = null; await showPage(nav.dataset.page); return; }
   const edit = event.target.closest("[data-edit]");
   if (edit) { await editRequest(edit.dataset.edit); return; }
-  const editStatus = event.target.closest("[data-edit-status]");
-  if (editStatus) { await editRequest(editStatus.dataset.editStatus, true); return; }
   const remove = event.target.closest("[data-delete]");
   if (remove) { await deleteRequest(remove.dataset.delete, remove.dataset.adminDelete === "true"); return; }
   if (event.target.closest("[data-close-edit]")) { document.getElementById("edit-section").innerHTML = ""; return; }
