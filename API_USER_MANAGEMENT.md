@@ -45,7 +45,7 @@ All user routes require an authenticated Admin. Unauthenticated requests return 
 
 ### POST /api/admin/users
 
-Required JSON fields: full_name (1–100 characters), email (valid address, maximum 150, normalized to lowercase), user_role, password, and confirm_password. New account roles can be Student, Faculty, or Staff; use the explicit Admin setup command for the single Admin. Passwords must match and contain 12–128 characters.
+Required JSON fields: full_name (1–100 characters), email (valid address, maximum 150, normalized to lowercase), user_role, password, and confirm_password. New account roles can be Student, Faculty, or Non-Teaching Staff; use the explicit Admin setup command for the single Admin. Passwords must match and contain 12–128 characters.
 
 Example request:
 
@@ -63,7 +63,7 @@ A duplicate email returns 409, for example {"error":"An account with this email 
 
 ### GET /api/admin/users
 
-No request body. Optional q query parameter searches name or email. Success is 200:
+No request body. Optional q query parameter searches name or email. Optional role filters Student, Faculty, or Non-Teaching Staff. Admin accounts are excluded from this directory. Success is 200:
 
 ~~~json
 {"users":[{"user_id":23,"full_name":"Example User","email":"user@example.edu","user_role":"Student"}]}

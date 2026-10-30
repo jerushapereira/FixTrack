@@ -43,7 +43,8 @@ app.config.update(
 )
 Session(app)
 csrf = CSRFProtect(app)
-ALLOWED_ROLES = {"Student", "Faculty", "Staff", "Admin"}
+ALLOWED_ROLES = {"Student", "Faculty", "Non-Teaching Staff", "Admin"}
+REGULAR_USER_ROLES = {"Student", "Faculty", "Non-Teaching Staff"}
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 PASSWORD_MIN = 12
 PASSWORD_MAX = 128
@@ -100,7 +101,7 @@ def _validate_profile(data, partial=False):
     if "user_role" in data:
         role = data["user_role"]
         if not isinstance(role, str) or role not in ALLOWED_ROLES:
-            return None, "user_role must be Student, Faculty, Staff, or Admin."
+            return None, "user_role must be Student, Faculty, Non-Teaching Staff, or Admin."
         values["user_role"] = role
     elif not partial:
         return None, "user_role is required."
@@ -185,37 +186,6 @@ def csrf_error(_error):
 @app.get("/api/auth/csrf")
 def get_csrf_token():
     return jsonify(csrf_token=generate_csrf())
-
-
-@app.post("/api/auth/register")
-def register_user():
-    """Create a regular Student account; public signup cannot grant Admin access."""
-    data = _json_object()
-    if data is None or set(data) != {"full_name", "email", "password", "confirm_password"}:
-        return jsonify(error="Provide full_name, email, password, and confirm_password."), 400
-    profile, error = _validate_profile(
-        {"full_name": data.get("full_name"), "email": data.get("email")}, partial=True
-    )
-    if error:
-        return jsonify(error=error), 400
-    password, error = _validate_password(data)
-    if error:
-        return jsonify(error=error), 400
-
-    password_hash = generate_password_hash(password)
-    try:
-        with database_connection() as connection:
-            with connection.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(
-                    "INSERT INTO campus_users (full_name, email, user_role, password_hash) "
-                    "VALUES (%s, %s, 'Student', %s) "
-                    "RETURNING user_id, full_name, email, user_role",
-                    (profile["full_name"], profile["email"], password_hash),
-                )
-                user = cursor.fetchone()
-    except psycopg2.errors.UniqueViolation:
-        return jsonify(error="An account with this email already exists."), 409
-    return jsonify(message="Account created. Sign in to continue.", user=_public_user(user)), 201
 
 
 @app.post("/api/auth/login")
@@ -320,8 +290,8 @@ def create_user():
     values, error = _validate_profile({key: data.get(key) for key in ("full_name", "email", "user_role")})
     if error:
         return jsonify(error=error), 400
-    if values["user_role"] == "Admin":
-        return jsonify(error="Use the explicit setup_admin.py command to designate the single Admin account."), 400
+    if values["user_role"] not in REGULAR_USER_ROLES:
+        return jsonify(error="Choose Student, Faculty, or Non-Teaching Staff."), 400
     password, error = _validate_password(data)
     if error:
         return jsonify(error=error), 400
@@ -343,13 +313,25 @@ def create_user():
 @admin_required
 def list_users():
     query = request.args.get("q", "").strip()
+    role = request.args.get("role", "").strip()
+    if role and role not in REGULAR_USER_ROLES:
+        return jsonify(error="role must be Student, Faculty, or Non-Teaching Staff."), 400
     with database_connection() as connection:
         with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+            conditions = ["user_role <> %s"]
+            params = ["Admin"]
+            if role:
+                conditions.append("user_role = %s")
+                params.append(role)
             if query:
                 pattern = "%" + query + "%"
-                cursor.execute("SELECT user_id, full_name, email, user_role FROM campus_users WHERE full_name ILIKE %s OR email ILIKE %s ORDER BY user_id", (pattern, pattern))
-            else:
-                cursor.execute("SELECT user_id, full_name, email, user_role FROM campus_users ORDER BY user_id")
+                conditions.append("(full_name ILIKE %s OR email ILIKE %s)")
+                params.extend([pattern, pattern])
+            sql = "SELECT user_id, full_name, email, user_role FROM campus_users"
+            if conditions:
+                sql += " WHERE " + " AND ".join(conditions)
+            sql += " ORDER BY user_role, full_name, user_id"
+            cursor.execute(sql, tuple(params))
             users = cursor.fetchall()
     return jsonify(users=[_public_user(user) for user in users])
 
@@ -437,6 +419,8 @@ def delete_user(user_id):
                 user = cursor.fetchone()
                 if not user:
                     return jsonify(error="User not found."), 404
+                if user_id == g.current_user["user_id"]:
+                    return jsonify(error="You cannot delete your own account. Another Admin must manage this account."), 403
                 cursor.execute("SELECT 1 FROM maintenance_requests WHERE reporter_id = %s LIMIT 1", (user_id,))
                 if cursor.fetchone():
                     return jsonify(error="This user reported maintenance requests and cannot be deleted while those records are retained."), 409
@@ -481,6 +465,23 @@ def _rows(query, params=()):
         with connection.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
+
+
+def _find_unresolved_duplicate(cursor, location_id, category):
+    """Find an open request for this location/category before inserting another."""
+    # Locking the location serializes concurrent submissions to the same location.
+    cursor.execute("SELECT location_id FROM campus_locations WHERE location_id = %s FOR UPDATE", (location_id,))
+    if cursor.fetchone() is None:
+        return None
+    cursor.execute(
+        "SELECT request_id FROM maintenance_requests "
+        "WHERE location_id = %s AND lower(category) = lower(%s) "
+        "AND current_status IN ('Pending', 'In Progress') "
+        "ORDER BY request_id LIMIT 1",
+        (location_id, category),
+    )
+    duplicate = cursor.fetchone()
+    return duplicate["request_id"] if duplicate else None
 
 
 def _id_value(value):
@@ -615,6 +616,9 @@ def create_own_request():
     try:
         with database_connection() as connection:
             with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                duplicate_id = _find_unresolved_duplicate(cursor, location_id, category)
+                if duplicate_id is not None:
+                    return jsonify(error=f"An unresolved {category} request already exists for this location (request #{duplicate_id})."), 409
                 cursor.execute("INSERT INTO maintenance_requests (reporter_id, location_id, title, description, category, priority) VALUES (%s, %s, %s, %s, %s, %s) RETURNING request_id, reporter_id, location_id, title, description, category, priority, current_status, reported_at", (g.current_user["user_id"], location_id, title, description, category, priority))
                 created = dict(cursor.fetchone())
     except psycopg2.errors.ForeignKeyViolation:
@@ -647,13 +651,20 @@ def search_requests():
     title = request.args.get("title", "").strip()
     category = request.args.get("category", "").strip()
     status = request.args.get("status", "").strip()
+    priority = request.args.get("priority", "").strip()
     location = request.args.get("location", "").strip()
+    reporter_name = request.args.get("reporter_name", "").strip()
+    reporter_role = request.args.get("reporter_role", "").strip()
     if request_id and (not request_id.isdigit() or int(request_id) < 1):
         return jsonify(error="Request ID must be a positive whole number."), 400
-    if len(title) > 120 or len(category) > 40 or len(location) > 100:
+    if len(title) > 120 or len(category) > 40 or len(location) > 100 or len(reporter_name) > 100:
         return jsonify(error="Search text is longer than the supported field length."), 400
     if status and status not in {"Pending", "In Progress", "Resolved"}:
         return jsonify(error="Status must be Pending, In Progress, or Resolved."), 400
+    if priority and priority not in {"Low", "Medium", "High"}:
+        return jsonify(error="Priority must be Low, Medium, or High."), 400
+    if reporter_role and reporter_role not in ALLOWED_ROLES:
+        return jsonify(error="Reporter role must be Student, Faculty, Non-Teaching Staff, or Admin."), 400
 
     conditions = []
     params = []
@@ -672,15 +683,45 @@ def search_requests():
     if status:
         conditions.append("r.current_status = %s")
         params.append(status)
+    if priority:
+        conditions.append("r.priority = %s")
+        params.append(priority)
     if location:
         conditions.append("(l.building_name ILIKE %s OR l.area_name ILIKE %s)")
         params.extend(["%" + location + "%", "%" + location + "%"])
+    if reporter_name:
+        conditions.append("u.full_name ILIKE %s")
+        params.append("%" + reporter_name + "%")
+    if reporter_role:
+        conditions.append("u.user_role = %s")
+        params.append(reporter_role)
 
-    query = """SELECT r.request_id, r.reporter_id, r.location_id, r.title,
-        r.description, r.category, r.priority, r.current_status, r.reported_at,
-        l.building_name, l.area_name
-        FROM maintenance_requests AS r
-        JOIN campus_locations AS l ON l.location_id = r.location_id"""
+    if g.current_user["user_role"] == "Admin":
+        query = """SELECT r.request_id, r.reporter_id, r.location_id, r.title,
+            r.description, r.category, r.priority, r.current_status, r.reported_at,
+            l.building_name, l.area_name,
+            u.full_name AS reporter_name, u.email AS reporter_email,
+            u.user_role AS reporter_role,
+            current_worker.worker_name AS assigned_worker_name
+            FROM maintenance_requests AS r
+            JOIN campus_locations AS l ON l.location_id = r.location_id
+            JOIN campus_users AS u ON u.user_id = r.reporter_id
+            LEFT JOIN LATERAL (
+                SELECT w.full_name AS worker_name
+                FROM assignments AS a
+                JOIN workers AS w ON w.worker_id = a.worker_id
+                WHERE a.request_id = r.request_id AND a.ended_at IS NULL
+                ORDER BY a.assigned_at DESC
+                LIMIT 1
+            ) AS current_worker ON TRUE"""
+    else:
+        query = """SELECT r.request_id, r.reporter_id, r.location_id, r.title,
+            r.description, r.category, r.priority, r.current_status, r.reported_at,
+            l.building_name, l.area_name,
+            u.full_name AS reporter_name, u.user_role AS reporter_role
+            FROM maintenance_requests AS r
+            JOIN campus_locations AS l ON l.location_id = r.location_id
+            JOIN campus_users AS u ON u.user_id = r.reporter_id"""
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY r.reported_at DESC"
@@ -891,6 +932,9 @@ def create_request_for_user():
     try:
         with database_connection() as connection:
             with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                duplicate_id = _find_unresolved_duplicate(cursor, data["location_id"], data["category"])
+                if duplicate_id is not None:
+                    return jsonify(error=f"An unresolved {data['category']} request already exists for this location (request #{duplicate_id})."), 409
                 cursor.execute("INSERT INTO maintenance_requests (reporter_id, location_id, title, description, category, priority) VALUES (%s, %s, %s, %s, %s, %s) RETURNING request_id, reporter_id, location_id, title, description, category, priority, current_status, reported_at", (data["reporter_id"], data["location_id"], data["title"], data["description"], data["category"], data["priority"]))
                 created = dict(cursor.fetchone())
     except psycopg2.errors.ForeignKeyViolation:
